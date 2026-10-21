@@ -1443,7 +1443,7 @@ does. The Mac held about 6 GB in swap throughout. Result files, every run listed
 
 Each Kapitsa table below also carries a paragraph with that model's newest flag-free run on 0.2.2, which is after the
 M5 prefill kernels and the KFlash-tree default; the other engines' rows are the 2026-10-19 session in every table.
-Current main also peaks 0.6-0.8 GB above these rows on all four models (4.7 → 5.4 GB, 19.4 → 20.2, 20.8 → 21.4,
+Current main also peaks 0.3-0.8 GB above these rows on all four models (4.7 → 5.4 GB, 19.4 → 20.2, 20.8 → 21.4,
 18.6 → 18.9 GB). The doctor's memory plan is the same at 0.1.36 and current main, so that is runtime state rather
 than weights or KV; it is not attributed yet.
 
