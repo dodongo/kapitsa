@@ -236,8 +236,10 @@ fill 15 rows instead of 7. Its first version drafted two 8-row tiles one after t
 the drafter's weights, so the drafting pass doubled (12.4 ms per cycle against 6.7) and gave back what the wider verify
 won. The drafter's two tiles are 8-row tiles of the same GEMM (`dfl_put2` writes both), so a pair kernel (`qmm8t2d`)
 multiplies both from one weight load: each weight tile is read once and multiplied twice, one destination per tile.
-`NI_DFLASH_BLOCK=16` is opt-in, needs KFlash trees and a target with the wide verify, and leaves the default 8-row block
-untouched.
+`NI_DFLASH_BLOCK=16` is opt-in, needs KFlash trees and a target with the wide verify, drafts with the matrix units only
+(an M5-class GPU on macOS 26, the tensor path on, 4-bit group-64 projections, not the v1 drafter: a load-time check says
+so rather than the first request), and leaves the default 8-row block untouched. Requests take turns while it is on:
+it drafts a depth-15 lattice and has no batched cycle, so two requests decoding together share no verify.
 
 A paired A/B on the 27B over a 256-token coding prompt (greedy, three interleaved runs each, `NI_ANE=0`, all under the
 GPU lock: MacBook Pro Mac17,8, Apple M5 Pro, macOS 26.5.2, this change's code) measures it: the default 8-row block runs

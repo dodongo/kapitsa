@@ -351,6 +351,8 @@ QLinear DFlash2::row_view(const QLinear& src, uint32_t r0, uint32_t n) {
   return v;
 }
 
+static bool dfl_tw_supported();  // below: the drafter's GEMMs through Metal 4 tensor_ops
+
 DFlash2::DFlash2(Qwen35& target, const std::string& dir, int bits) : tg_(target), dir_(dir) {
   const double t0 = now_ms(), fp0 = footprint_gb();
   bits_ = bits ? bits : (getenv("NI_DFLASH_BITS") ? atoi(getenv("NI_DFLASH_BITS")) : 4);
@@ -504,6 +506,16 @@ DFlash2::DFlash2(Qwen35& target, const std::string& dir, int bits) : tg_(target)
     if (block() > kB) {
       if (!tree_) fatal("NI_DFLASH_BLOCK=%d needs KFlash trees (NI_KFLASH=1)", block());
       if (!tg_.verify_wide_ok()) fatal("NI_DFLASH_BLOCK=%d: this target has no wide tree verify", block());
+      // and the drafting pass itself must run on the matrix units: a 16-row block drafts its two tiles with the pair
+      // kernel and the tensor-path GEMMs, and has no 8-row fallback (encode_draft_impl and enc_qmm8 fatal otherwise).
+      // Said here, while the model loads, not on the first request.
+      bool tw = !cfg_.v1 && dfl_tw_supported() && v8_knobs().tw && !(v8_knobs().dfl & 32);
+      for (auto& L : layers_)
+        for (const QLinear* q : {&L.q, &L.kv, &L.o, &L.gate, &L.up, &L.down})
+          tw = tw && q->q4() && q->gs == 64 && q->K % 64 == 0;
+      if (!tw)
+        fatal("NI_DFLASH_BLOCK=%d: the drafting pass on a 16-row block needs the tensor path (not the v1 drafter, the "
+              "matrix units on, 4-bit group-64 projections)", block());
       allowed |= 1u << (block() - 1);
       allowed &= ~(1u << (kB - 1));
     }

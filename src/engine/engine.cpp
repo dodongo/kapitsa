@@ -893,6 +893,9 @@ int Engine::batch_rows(int n) const {
     return v && *v ? atoi(v) : -1;
   }();
   if (mode == 0 || n < 2 || n > 8 || (!dfl_ && !lili_) || (mode < 0 && !batch_measured_)) return 0;
+  // a 16-row drafting block has no batched cycle: it drafts a depth-15 lattice with the pair kernel, and the batch loop
+  // drafts 7-token chains (encode_draft with tree = false), so the requests take turns instead
+  if (dfl_ && DFlash2::block() > DFlash2::kB) return 0;
   // NI_BATCH_ROWS="n:rows,...": rows per member for n members (0: take turns)
   static const std::vector<int> env = [] {
     std::vector<int> t(9, -1);
