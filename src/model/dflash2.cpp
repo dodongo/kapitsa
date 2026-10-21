@@ -1042,13 +1042,18 @@ void DFlash2::enc_qmm8(Encoder& e, const std::vector<DflSeg8>& segs, const Buffe
   uint32_t ks = gpr > 32 && gpr <= 64 ? 4 : 8;
   while (ks > 1 && gpr < ks) ks /= 2;
   const bool pf = nt == 32 || gpr > 32;
+  // A 16-row drafting block is two 8-row tiles (dfl_put2): qmm8t2d takes the pair from one weight load, where the
+  // per-tile loop below streams the weights once per tile. NI_DFL_PAIR=0 keeps the per-tile path (A/B of the pair).
+  static const bool pair_env = !getenv("NI_DFL_PAIR") || std::string(getenv("NI_DFL_PAIR")) != "0";
+  const bool pair = tiles >= 2 && tiles % 2 == 0 && pair_env;  // whole tiles only (a block of 8 or 16 rows)
   kp::Qmm8 p{};
   p.K = K;
-  p.R = 8;
+  p.R = pair ? 16 : 8;
   p.nseg = uint32_t(segs.size());
   p.ks = ks;
   uint32_t tg = 0;
-  e.use(dpipe(std::string(pf ? "qmm8tp" : "qmm8t") + "_b4_nt" + std::to_string(nt)));
+  e.use(dpipe(std::string(pf ? (pair ? "qmm8t2dp" : "qmm8tp") : (pair ? "qmm8t2d" : "qmm8t")) + "_b4_nt" +
+              std::to_string(nt)));
   for (size_t i = 0; i < segs.size(); ++i) {
     p.N[i] = segs[i].L->N;
     p.y_ld[i] = segs[i].y_ld;
@@ -1057,6 +1062,24 @@ void DFlash2::enc_qmm8(Encoder& e, const std::vector<DflSeg8>& segs, const Buffe
     tg += (segs[i].L->N + uint32_t(nt) - 1) / uint32_t(nt);
   }
   p.tg_begin[segs.size()] = tg;
+  if (pair) {  // pairs of tiles, 16 rows each: the first tile's rows 0-7, the second's 8-15 of one contiguous Y
+    for (int t = 0; t + 1 < tiles; t += 2) {
+      for (size_t i = 0; i < 4; ++i) {
+        const DflSeg8& sg = segs[std::min(i, segs.size() - 1)];
+        e.buf(int(i * 4 + 0), sg.L->w->buf);
+        e.buf(int(i * 4 + 1), sg.L->s->buf);
+        e.buf(int(i * 4 + 2), sg.L->b->buf);
+        e.buf(int(i * 4 + 3), sg.y, size_t(t) * 8 * sg.y_ld * 4);
+      }
+      e.buf(16, xh, (size_t(t) * 16 + 8) * K * 2);     // tile t's T table
+      e.buf(17, xs, size_t(t) * (K / 8) * 4);          // tile t's group sums
+      e.buf(18, xh, (size_t(t) * 16 + 24) * K * 2);    // tile t + 1's T table
+      e.buf(19, xs, size_t(t + 1) * (K / 8) * 4);      // tile t + 1's group sums
+      e.val(20, p);
+      e.dispatch(tg, 1, 1, 32 * ks);
+    }
+    return;
+  }
   for (int t = 0; t < tiles; ++t) {
     for (size_t i = 0; i < 4; ++i) {
       const DflSeg8& sg = segs[std::min(i, segs.size() - 1)];
