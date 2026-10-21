@@ -465,10 +465,12 @@ DFlash2::DFlash2(Qwen35& target, const std::string& dir, int bits) : tg_(target)
   if (dyn_tau_ <= 0) dyn_tau_t_ = 0.0f;
   if (const char* v = getenv("NI_DFLASH_EXACT_MOE")) exact_moe_ = atoi(v) != 0;
   if (const char* v = getenv("NI_DFLASH_QT")) walk_tf_ = std::max(0.0f, float(atof(v)));
-  // KFlash on every target. The budget's cache key: this model, drafter and chip.
+  // KFlash on every target. The budget's cache key: this model, drafter, bit depth, drafting block and chip (a 16-row
+  // block drafts a deeper lattice and verifies wider rows, so its learned capacity must not be the 8-row block's).
   {
     std::string key = tg_.model_dir().substr(tg_.model_dir().find_last_of('/') + 1) + "-" +
-                      dir.substr(dir.find_last_of('/') + 1) + "-b" + std::to_string(bits_) + "-" + Gpu::get().name();
+                      dir.substr(dir.find_last_of('/') + 1) + "-b" + std::to_string(bits_) +
+                      (block() > kB ? "-blk16" : "") + "-" + Gpu::get().name();
     for (char& c : key)
       if (!isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '.') c = '_';
     kf_budget_ = std::make_unique<KfBudget>(key);
