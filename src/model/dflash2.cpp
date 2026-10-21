@@ -508,14 +508,19 @@ DFlash2::DFlash2(Qwen35& target, const std::string& dir, int bits) : tg_(target)
       if (!tg_.verify_wide_ok()) fatal("NI_DFLASH_BLOCK=%d: this target has no wide tree verify", block());
       // and the drafting pass itself must run on the matrix units: a 16-row block drafts its two tiles with the pair
       // kernel and the tensor-path GEMMs, and has no 8-row fallback (encode_draft_impl and enc_qmm8 fatal otherwise).
-      // Said here, while the model loads, not on the first request.
-      bool tw = !cfg_.v1 && dfl_tw_supported() && v8_knobs().tw && !(v8_knobs().dfl & 32);
+      // Said here, while the model loads, not on the first request. The knobs that take the drafting pass or the
+      // attention off that path (V8Knobs::dfl bit 1, the old attention; bit 128, the MLP's own qmm8_gu; and
+      // NI_DFLASH_ATTN=scalar) count as missing too, so they are refused here rather than on the first cycle.
+      const char* av = getenv("NI_DFLASH_ATTN");
+      const bool fused_attn = !(av && std::string(av) == "scalar") && !(v8_knobs().dfl & 1);
+      bool tw = !cfg_.v1 && fused_attn && dfl_tw_supported() && v8_knobs().tw && !(v8_knobs().dfl & (32 | 128));
       for (auto& L : layers_)
         for (const QLinear* q : {&L.q, &L.kv, &L.o, &L.gate, &L.up, &L.down})
           tw = tw && q->q4() && q->gs == 64 && q->K % 64 == 0;
       if (!tw)
-        fatal("NI_DFLASH_BLOCK=%d: the drafting pass on a 16-row block needs the tensor path (not the v1 drafter, the "
-              "matrix units on, 4-bit group-64 projections)", block());
+        fatal("NI_DFLASH_BLOCK=%d: the drafting pass on a 16-row block needs the tensor path and the fused attention "
+              "(not the v1 drafter, the matrix units on, 4-bit group-64 projections, no NI_DFLASH_ATTN=scalar or "
+              "V8Knobs::dfl 1 / 128)", block());
       allowed |= 1u << (block() - 1);
       allowed &= ~(1u << (kB - 1));
     }
