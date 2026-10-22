@@ -4,6 +4,7 @@
 #include "api/common.h"
 
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace ni::api {
@@ -47,6 +48,7 @@ class ChatCompletionsStream : public StreamWriter {
   std::string id_, model_;
   long created_;
   size_t tools_ = 0;  // tool calls sent: the next one's index
+  std::unordered_map<std::string, size_t> tool_indices_;
   int progress_read_ = -1;
 };
 

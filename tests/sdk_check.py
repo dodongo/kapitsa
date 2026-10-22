@@ -92,7 +92,8 @@ EVENT = TypeAdapter(anthropic.types.RawMessageStreamEvent)
 expect = {"text": ("end_turn", ["text"]), "reasoning-text": ("end_turn", ["thinking", "text"]),
           "reasoning-tools": ("tool_use", ["thinking", "tool_use", "tool_use"]),
           "custom-tool": ("tool_use", ["thinking", "tool_use"]), "length": ("max_tokens", ["thinking", "text"]),
-          "context-full": ("model_context_window_exceeded", ["text"]), "stop-sequence": ("stop_sequence", ["text"])}
+          "context-full": ("model_context_window_exceeded", ["text"]), "stop-sequence": ("stop_sequence", ["text"]),
+          "partial-tool": ("tool_use", ["tool_use"])}
 for name, (stop, kinds) in expect.items():
     for omitted in (False, True):
         case = name + ("-omitted" if omitted else "")
@@ -162,7 +163,8 @@ EV = TypeAdapter(openai.types.responses.ResponseStreamEvent)
 want = {"text": ("completed", ["message"]), "reasoning-text": ("completed", ["reasoning", "message"]),
         "reasoning-tools": ("completed", ["reasoning", "function_call", "function_call"]),
         "custom-tool": ("completed", ["reasoning", "custom_tool_call"]), "length": ("incomplete", ["reasoning", "message"]),
-        "context-full": ("incomplete", ["message"]), "stop-sequence": ("completed", ["message"])}
+        "context-full": ("incomplete", ["message"]), "stop-sequence": ("completed", ["message"]),
+        "partial-tool": ("completed", ["function_call"])}
 for name, (status, kinds) in want.items():
     body = json.load(open(os.path.join(CASES, f"responses-{name}.json")))
     try:
@@ -229,7 +231,7 @@ CHUNK = openai.types.chat.ChatCompletionChunk
 chat_want = {"text": ("stop", "", "Hello", 0), "reasoning-text": ("stop", "Think.", "Hi", 0),
              "reasoning-tools": ("tool_calls", "Two reads.", "", 2), "custom-tool": ("tool_calls", "Patch.", "", 1),
              "length": ("length", "long", "cut", 0), "context-full": ("length", "", "cut", 0),
-             "stop-sequence": ("stop", "", "abc", 0)}
+             "stop-sequence": ("stop", "", "abc", 0), "partial-tool": ("tool_calls", "", "", 1)}
 for name, (finish, think, text, ncalls) in chat_want.items():
     events, bad = raw_events(os.path.join(CASES, f"chat-{name}.sse")), []
     for _, data in events:
@@ -264,12 +266,19 @@ for name, (finish, think, text, ncalls) in chat_want.items():
         check("chat: tool calls carry their arguments and ids, indexed 0, 1",
               [json.loads(t.function.arguments) for t in msg.tool_calls] == [{"file_path": "/a"}, {"file_path": "/b", "limit": 5}]
               and [t.id for t in msg.tool_calls] == ["call_A", "call_B"], msg.tool_calls)
-try:
-    for _ in oc.chat.completions.create(model="error", messages=MSG, stream=True):
-        pass
-    check("chat: an error event in the stream raises", False, "no error")
-except openai.APIError as e:
-    check("chat: an error event in the stream raises APIError with its message", "the engine failed" in str(e), e)
+    if name == "partial-tool":
+        parts = [t for c in chunks for t in (c.choices[0].delta.tool_calls or [])]
+        check("chat: partial arguments arrive in separate chunks and assemble into one call",
+              len(parts) == 2 and parts[0].index == parts[1].index == 0 and parts[1].id is None and
+              msg.tool_calls[0].id == "call_stream" and msg.tool_calls[0].function.name == "Read" and
+              json.loads(msg.tool_calls[0].function.arguments) == {"file_path": "/long/file"}, parts)
+for name in ("error", "partial-error"):
+    try:
+        for _ in oc.chat.completions.create(model=name, messages=MSG, stream=True):
+            pass
+        check(f"chat {name}: an error event in the stream raises", False, "no error")
+    except openai.APIError as e:
+        check(f"chat {name}: an error event in the stream raises APIError with its message", "the engine failed" in str(e), e)
 try:
     oc.chat.completions.create(model="too-long", messages=MSG, stream=True)
     check("chat: a too-long prompt raises BadRequestError", False, "no error")

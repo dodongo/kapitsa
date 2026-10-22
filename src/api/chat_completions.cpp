@@ -103,10 +103,28 @@ std::string ChatCompletionsStream::delta(const ChatDelta& d) {
   std::string s;
   if (!d.reasoning.empty()) s += chunk(ojson{{"reasoning_content", d.reasoning}}, nullptr);
   if (!d.content.empty()) s += chunk(ojson{{"content", d.content}}, nullptr);
-  if (!d.tool_calls.empty()) {
-    s += chunk(ojson{{"tool_calls", chat_tool_calls(d.tool_calls, tools_, true)}}, nullptr);
-    tools_ += d.tool_calls.size();
+  for (const auto& call : d.tool_call_deltas) {
+    auto [it, begin] = tool_indices_.emplace(call.id, tools_);
+    ojson function{{"arguments", call.arguments}};
+    ojson tool{{"index", it->second}};
+    if (begin) {
+      ++tools_;
+      tool["id"] = call.id;
+      tool["type"] = "function";
+      function["name"] = call.name;
+    }
+    tool["function"] = std::move(function);
+    s += chunk(ojson{{"tool_calls", ojson::array({tool})}}, nullptr);
   }
+  std::vector<ToolCall> complete;
+  size_t index = tools_;
+  for (const auto& call : d.tool_calls) {
+    if (tool_indices_.emplace(call.id, tools_).second) {
+      complete.push_back(call);
+      ++tools_;
+    }
+  }
+  if (!complete.empty()) s += chunk(ojson{{"tool_calls", chat_tool_calls(complete, index, true)}}, nullptr);
   return s;
 }
 

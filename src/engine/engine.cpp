@@ -2298,6 +2298,11 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     }
     if (parser.in_think()) ++res.reasoning_tokens;
     ChatDelta d = parser.push(t);
+    if (!parser.error().empty()) {
+      res.error = parser.error();
+      finish = "error";
+      return false;
+    }
     if (!d.content.empty()) {
       content_so_far += d.content;
       for (auto& st : r.stop) {
@@ -2314,7 +2319,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     res.reasoning += d.reasoning;
     res.content += d.content;
     for (auto& tc : d.tool_calls) res.tool_calls.push_back(tc);
-    if (!d.reasoning.empty() || !d.content.empty() || !d.tool_calls.empty())
+    if (!d.reasoning.empty() || !d.content.empty() || !d.tool_calls.empty() || !d.tool_call_deltas.empty())
       if (!on_delta(d)) finish = "cancelled";
     if (finish.empty() && gen >= r.max_tokens) finish = "length";
     return finish.empty() && !g_break;
@@ -3029,10 +3034,15 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     res.images = std::make_shared<const std::vector<vision::Prepared>>(std::move(images));
   }
   ChatDelta tail = parser.finish(finish == "stop");
+  if (!parser.error().empty() && finish != "cancelled") {
+    res.error = parser.error();
+    finish = "error";
+  }
   res.reasoning += tail.reasoning;
   res.content += tail.content;
   for (auto& tc : tail.tool_calls) res.tool_calls.push_back(tc);
-  if (!tail.reasoning.empty() || !tail.content.empty() || !tail.tool_calls.empty()) on_delta(tail);
+  if (parser.error().empty() && (!tail.reasoning.empty() || !tail.content.empty() || !tail.tool_calls.empty() ||
+                               !tail.tool_call_deltas.empty())) on_delta(tail);
   // Dory (NVIDIA's nemotron_v3 reasoning parser): with force_nonempty_content, on by default here (the card asks
   // coding agents to set it), a reply that put everything in its reasoning and left the content empty returns that
   // text as its content too (a last delta), so agents that read the content alone get the answer

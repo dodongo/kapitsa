@@ -14,6 +14,7 @@ namespace {
 
 struct Out {
   std::string reasoning, content;
+  std::string error;
   std::vector<ToolCall> calls;
   std::vector<ChatDelta> deltas;
 };
@@ -52,6 +53,7 @@ Out run(const Tokenizer& tok, const std::string& text, bool think_tools, bool in
   };
   for (int id : tok.encode(text)) add(p.push(id));
   add(p.finish(ended));
+  o.error = p.error();
   return o;
 }
 
@@ -235,6 +237,64 @@ int main(int argc, char** argv) {
     for (int id : ids) content += p.push(id).content;
     content += p.finish(false).content;
     check(content == "Hi!" + R, "a reply cut inside a character ends in U+FFFD", content);
+  }
+
+  {
+    const std::string code = "const message = \"hello \\ world\";\n\tprint('café 👋');\n";
+    std::string long_code;
+    for (int i = 0; i < 80; ++i) long_code += code;
+    for (bool text_tags : {false, true}) {
+      OutputParser p(tok, tok.find("<think>"), tok.find("</think>"), tok.find("<tool_call>"), tok.find("</tool_call>"),
+                     false, true, kTools, false, false,
+                     text_tags ? TextTags{true, "<tool_call>", "</tool_call>", false} : TextTags{});
+      const std::string text = call("run_shell", param("command", long_code));
+      std::string arguments, id;
+      int fragments = 0, completed = 0;
+      bool stable = true, early = false;
+      std::string final_arguments;
+      for (int token : tok.encode(text)) {
+        ChatDelta d = p.push(token);
+        for (const auto& part : d.tool_call_deltas) {
+          if (id.empty()) id = part.id;
+          stable = stable && id == part.id && (fragments == 0 ? part.name == "run_shell" : part.name.empty());
+          arguments += part.arguments;
+          ++fragments;
+          if (d.tool_calls.empty() && token != tok.find("</tool_call>")) early = true;
+        }
+        for (const auto& complete : d.tool_calls) {
+          stable = stable && id == complete.id;
+          final_arguments = complete.arguments;
+          ++completed;
+        }
+      }
+      p.finish();
+      check(p.error().empty() && early && fragments > 10 && completed == 1 && stable && arguments == final_arguments &&
+                ojson::parse(arguments)["command"] == long_code,
+            text_tags ? "XML text tags: string arguments arrive before completion" :
+                        "XML token tags: string arguments arrive before completion",
+            p.error());
+    }
+    const ojson tools = ojson::parse(R"([{"name":"f","parameters":{"properties":{
+      "text":{"type":"string"},"n":{"type":"integer"},"items":{"type":"array"},
+      "obj":{"type":"object"},"flag":{"type":"boolean"}}}}])");
+    Out typed = run(tok, call("f", param("text", long_code) + param("n", "3") + param("items", "[1,2]") +
+                                 param("obj", "{\"a\":true}") + param("flag", "false")), false, false, true, tools);
+    std::string joined;
+    for (const auto& d : typed.deltas)
+      for (const auto& part : d.tool_call_deltas) joined += part.arguments;
+    check(typed.error.empty() && typed.calls.size() == 1 && joined == typed.calls[0].arguments &&
+              ojson::parse(joined) == ojson{{"text", long_code}, {"n", 3}, {"items", ojson::array({1, 2})},
+                                           {"obj", ojson{{"a", true}}}, {"flag", false}},
+          "XML stream: mixed parameter types retain their final values", typed.error);
+    Out cut = run(tok, "<tool_call><function=run_shell><parameter=command>" + long_code, false, false, false);
+    check(!cut.error.empty() && cut.calls.empty(), "XML stream: an interrupted call is an error, not an executable call");
+    Out duplicate = run(tok, call("run_shell", param("command", long_code) + param("command", "changed")), false, false);
+    check(!duplicate.error.empty() && duplicate.calls.empty(), "XML stream: overwritten streamed arguments are rejected");
+    Out empty = run(tok, call("run_shell", ""), false, false);
+    std::string empty_args;
+    for (const auto& d : empty.deltas)
+      for (const auto& part : d.tool_call_deltas) empty_args += part.arguments;
+    check(empty.error.empty() && empty.calls.size() == 1 && empty_args == "{}", "XML stream: empty arguments complete once");
   }
 
   printf(fails ? "FAILED: %d\n" : "ALL PASSED\n", fails);

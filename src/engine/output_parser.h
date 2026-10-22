@@ -70,6 +70,7 @@ class OutputParser {
       pend_.clear();
     }
     if (in_tool_) {
+      if (!streamed_tool_.id.empty()) error_ = "Tool call ended before its closing tag";
       // unterminated tool call: surface as text
       emit(d, (tt_.tc_open.empty() ? std::string("<tool_call>") : tt_.tc_open) + tool_buf_ + s);
       in_tool_ = false;
@@ -82,6 +83,7 @@ class OutputParser {
 
   bool in_think() const { return in_think_; }
   int promoted() const { return promoted_; }  // tool calls returned from the reasoning (think_tools)
+  const std::string& error() const { return error_; }
 
  private:
   void push_plain(ChatDelta& d, int id) {
@@ -103,14 +105,22 @@ class OutputParser {
       held_.clear();
       in_tool_ = true;
       tool_buf_.clear();
+      streamed_tool_ = {};
+      stream_checked_ = 0;
       return;
     }
     if (parse_tools_ && id == tc_close_ && in_tool_) {
       tool_buf_ += dec_.flush();
       in_tool_ = false;
       ToolCall tc;
-      if (parse_tool(tool_buf_, tc)) d.tool_calls.push_back(tc);
-      else emit(d, "<tool_call>" + tool_buf_ + "</tool_call>");
+      if (parse_tool(tool_buf_, tc)) {
+        stream_tool(d, &tc);
+        tc.id = streamed_tool_.id;
+        if (error_.empty()) d.tool_calls.push_back(tc);
+      } else {
+        if (!streamed_tool_.id.empty()) error_ = "Invalid streamed tool call";
+        emit(d, "<tool_call>" + tool_buf_ + "</tool_call>");
+      }
       skip_leading_ws_ = true;
       return;
     }
@@ -121,6 +131,7 @@ class OutputParser {
     }
     if (in_tool_) {
       tool_buf_ += s;
+      stream_tool(d);
       return;
     }
     emit(d, s);
@@ -170,20 +181,31 @@ class OutputParser {
         held_.clear();
         in_tool_ = true;
         tool_buf_.clear();
+        streamed_tool_ = {};
+        stream_checked_ = 0;
       } else {  // the call's close tag
         in_tool_ = false;
         std::vector<ToolCall> calls;
-        if (tt_.json_calls ? parse_json_calls(tool_buf_, calls) : parse_tool(tool_buf_, calls.emplace_back()))
-          for (auto& c : calls) d.tool_calls.push_back(std::move(c));
-        else
+        if (tt_.json_calls ? parse_json_calls(tool_buf_, calls) : parse_tool(tool_buf_, calls.emplace_back())) {
+          if (!tt_.json_calls) {
+            stream_tool(d, &calls.front());
+            calls.front().id = streamed_tool_.id;
+          }
+          if (error_.empty())
+            for (auto& c : calls) d.tool_calls.push_back(std::move(c));
+        } else {
+          if (!streamed_tool_.id.empty()) error_ = "Invalid streamed tool call";
           emit(d, tt_.tc_open + tool_buf_ + tt_.tc_close);
+        }
         skip_leading_ws_ = true;
       }
     }
   }
   void text_out(ChatDelta& d, const std::string& t) {
-    if (in_tool_) tool_buf_ += t;
-    else emit(d, t);
+    if (in_tool_) {
+      tool_buf_ += t;
+      if (!tt_.json_calls) stream_tool(d);
+    } else emit(d, t);
   }
 
   // A JSON list of calls (or one call): [{"name": "f", "arguments": {...}}, ...]; arguments may be an object or the
@@ -361,6 +383,73 @@ class OutputParser {
     return true;
   }
 
+  void stream_tool(ChatDelta& d, const ToolCall* complete = nullptr) {
+    if (!error_.empty()) return;
+    if (!complete && !streamed_tool_.id.empty() && tool_buf_.size() - stream_checked_ < 64) return;
+    size_t f = tool_buf_.find("<function=");
+    if (f == std::string::npos) return;
+    size_t fe = tool_buf_.find('>', f);
+    if (fe == std::string::npos) return;
+    std::string name = tool_buf_.substr(f + 10, fe - f - 10);
+    std::string args = "{";
+    bool first = true;
+    if (complete) {
+      args = complete->arguments;
+    } else {
+      size_t p = fe + 1;
+      while (true) {
+        size_t ps = tool_buf_.find("<parameter=", p);
+        if (ps == std::string::npos) break;
+        size_t pe = tool_buf_.find('>', ps);
+        if (pe == std::string::npos) break;
+        std::string key = tool_buf_.substr(ps + 11, pe - ps - 11);
+        size_t ve = tool_buf_.find("</parameter>", pe);
+        if (ve == std::string::npos) ve = tool_buf_.find("</function>", pe);
+        bool closed = ve != std::string::npos;
+        std::string type = param_type(name, key);
+        if (!closed && type != "string") break;
+        if (!closed) {
+          ve = tool_buf_.size();
+          size_t keep = 0;
+          for (const std::string tag : {"</parameter>", "</function>"})
+            for (size_t n = std::min(ve - pe - 1, tag.size() - 1); n > keep; --n)
+              if (tool_buf_.compare(ve - n, n, tag, 0, n) == 0) {
+                keep = n;
+                break;
+              }
+          ve -= keep;
+        }
+        std::string value = trim_nl(tool_buf_.substr(pe + 1, ve - pe - 1));
+        if (!first) args += ',';
+        first = false;
+        args += ojson(key).dump() + ':';
+        if (type == "string") {
+          std::string quoted = ojson(value).dump();
+          args += closed ? quoted : quoted.substr(0, quoted.size() - 1);
+        } else {
+          ojson parsed = ojson::parse(value, nullptr, false);
+          args += parsed.is_discarded() ? ojson(value).dump() : parsed.dump();
+        }
+        if (!closed) break;
+        p = ve + 1;
+      }
+    }
+    bool begin = streamed_tool_.id.empty();
+    if (begin) {
+      streamed_tool_.id = complete ? complete->id : random_id("call_");
+      streamed_tool_.name = name;
+    }
+    if (name != streamed_tool_.name || args.compare(0, streamed_tool_.arguments.size(), streamed_tool_.arguments) != 0) {
+      error_ = "Tool call arguments changed after they were streamed";
+      return;
+    }
+    std::string fragment = args.substr(streamed_tool_.arguments.size());
+    if (begin || !fragment.empty())
+      d.tool_call_deltas.push_back({streamed_tool_.id, begin ? name : "", std::move(fragment)});
+    streamed_tool_.arguments = std::move(args);
+    stream_checked_ = tool_buf_.size();
+  }
+
   StreamDecoder dec_;
   StreamDecoder hdec_;  // text of held tokens (think_tools)
   TextTags tt_;
@@ -371,6 +460,9 @@ class OutputParser {
   const ojson& tools_;
   bool in_tool_ = false, skip_leading_ws_ = false;
   std::string tool_buf_, held_;
+  ToolCall streamed_tool_;
+  size_t stream_checked_ = 0;
+  std::string error_;
   // think_tools hold: token ids, complete call bodies, the body being read, </think> seen after them
   bool holding_ = false, in_body_ = false, closed_ = false;
   std::vector<int> hold_ids_;

@@ -609,6 +609,23 @@ void chat_events() {
     check(s == want, "chat stream: a delta's reasoning, text and calls are a chunk each, in that order", s);
   }
   {
+    ChatCompletionsStream w("chatcmpl-1", "m", 123);
+    ChatDelta first;
+    first.tool_call_deltas = {{"call_stream", "codemode", "{\"code\":\"const "}};
+    ChatDelta second;
+    second.tool_call_deltas = {{"call_stream", "", "x = 1;\"}"}};
+    second.tool_calls = {{"call_stream", "codemode", "{\"code\":\"const x = 1;\"}"}};
+    auto events = parse_sse(w.delta(first) + w.delta(second) + w.delta(call("call_B", "Read", R"({"file_path":"/b"})")));
+    const auto& a = events[0].data["choices"][0]["delta"]["tool_calls"][0];
+    const auto& b = events[1].data["choices"][0]["delta"]["tool_calls"][0];
+    const auto& c = events[2].data["choices"][0]["delta"]["tool_calls"][0];
+    check(events.size() == 3 && a["index"] == 0 && a["id"] == "call_stream" && a["function"]["name"] == "codemode" &&
+              b["index"] == 0 && !b.contains("id") && !b["function"].contains("name") && c["index"] == 1 &&
+              a["function"]["arguments"].get<std::string>() + b["function"]["arguments"].get<std::string>() ==
+                  second.tool_calls[0].arguments,
+          "chat stream: argument fragments keep one call index without duplicating the completed call");
+  }
+  {
     ChatResult cut = result("length");
     cut.loops = 2;
     check(ChatCompletionsStream("chatcmpl-1", "m", 123).end(cut) ==
@@ -786,10 +803,10 @@ std::vector<ChatDelta> generate(const TmplModel& m, const std::string& text, boo
   *ids = m.tok.encode(text);
   for (int id : *ids) {
     ChatDelta d = p.push(id);
-    if (!d.reasoning.empty() || !d.content.empty() || !d.tool_calls.empty()) out.push_back(d);
+    if (!d.reasoning.empty() || !d.content.empty() || !d.tool_calls.empty() || !d.tool_call_deltas.empty()) out.push_back(d);
   }
   ChatDelta t = p.finish(true);
-  if (!t.reasoning.empty() || !t.content.empty() || !t.tool_calls.empty()) out.push_back(t);
+  if (!t.reasoning.empty() || !t.content.empty() || !t.tool_calls.empty() || !t.tool_call_deltas.empty()) out.push_back(t);
   return out;
 }
 
@@ -1008,12 +1025,18 @@ void dump_cases(const std::string& dir) {
   full.context_full = true;
   seq.stop_sequence = "STOP";
   err.error = "the engine failed";
+  ChatDelta partial_begin, partial_end;
+  partial_begin.tool_call_deltas = {{"call_stream", "Read", R"({"file_path":"/long/)"}};
+  partial_end.tool_call_deltas = {{"call_stream", "", R"(file"})"}};
+  partial_end.tool_calls = {{"call_stream", "Read", R"({"file_path":"/long/file"})"}};
   const std::vector<Case> cases = {
       {"text", {content("Hel"), content("lo")}, stop},
       {"reasoning-text", {reasoning("Th"), reasoning("ink."), content("Hi")}, stop},
       {"reasoning-tools", {reasoning("Two reads."), call("call_A", "Read", R"({"file_path":"/a"})"),
                            call("call_B", "Read", R"({"file_path":"/b","limit":5})")}, tools},
       {"custom-tool", {reasoning("Patch."), call("call_P", "apply_patch", R"({"input":"*** Begin Patch\n*** End Patch"})")}, tools},
+      {"partial-tool", {partial_begin, partial_end}, tools},
+      {"partial-error", {partial_begin}, err},
       {"length", {reasoning("long"), content("cut")}, length},
       {"context-full", {content("cut")}, full},
       {"stop-sequence", {content("abc")}, seq},

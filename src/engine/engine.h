@@ -217,6 +217,7 @@ struct ChatDelta {
   std::string reasoning;
   std::string content;
   std::vector<ToolCall> tool_calls; // complete calls, emitted when their closing tag arrives
+  std::vector<ToolCall> tool_call_deltas;
 };
 
 struct ChatResult {
