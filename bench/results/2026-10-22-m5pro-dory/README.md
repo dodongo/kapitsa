@@ -84,9 +84,12 @@ at 16K** (1.14x), and against the 03:26 pre-#287 runs, 2.66x and 2.39x. The atte
 the change reads like across two builds a few hours apart, not a measurement of it: part of the difference is the two
 sessions, and the end-to-end gain is larger than the kernel's share of the step, which these records do not explain. Decode
 is unchanged inside the runs' spread (70.7/73.1 -> 71.7/71.2 at T = 0.6, 72.5/80.5 -> 72.2/80.3 greedy). The cached
-follow-ups read 0.13-0.14 / 0.21 s against 0.10-0.11 / 0.15-0.16: a cached follow-up prefills a short suffix, which is the
-path this change touches, so the 16K figure (about 30-40% slower) is a regression candidate rather than noise and these two
-records do not explain it. The peak footprint is unchanged: decode 3.65 / 4.09 GB in both sessions, the 16K-prefill peak
+follow-ups read 0.13-0.14 / 0.21 s against 0.10-0.11 / 0.15-0.16, and that is this switch, not the session: in an A/B the
+same evening `NI_DORY_ATTN_T=0` reads 0.092 / 0.154 s of cached follow-up against 0.113 / 0.195 on the default (+23% / +27%,
+about 40 ms at 16K), with cold prefill at 1,545 / 1,163 against 1,600 / 1,281 tok/s (the default arm was contention-flagged
+at 6.07% mean, so its prefill is a lower bound). A cached follow-up prefills a short suffix, where the tensor kernel's 32-token
+threadgroups and 16-key tiles have nothing to amortize, so the 40 ms is the price of the prefill cells; falling back below
+some token count is follow-up work, not part of this measurement. The peak footprint is unchanged: decode 3.65 / 4.09 GB in both sessions, the 16K-prefill peak
 4.18 -> 4.19 GiB on last-loop KV and 5.02 -> 4.98 on per-loop. Against the other engines on this Mac
 (mlx-lm 1,401 / 1,278, llama.cpp 938 / 951), the flag-free per-loop run reads 1.18x mlx-lm at 4K and 1.03x at 16K,
 and 1.77x / 1.38x llama.cpp.

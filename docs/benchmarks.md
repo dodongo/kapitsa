@@ -1735,9 +1735,12 @@ interleaved A/B), and that A/B put the whole prefill at 1.04x / 1.07x on one day
 sessions a few hours apart, so read it as what the change reads like across builds rather than as a measured 1.08x. Decode
 is inside the spread (71.7 / 71.2 tok/s at T = 0.6, 72.2 / 80.3 greedy; the per-loop record has two repetition-loop flags
 in its T = 0.6 runs, one of them the 76.89 maximum, so its median 71.15 is the reading), the cached follow-ups read
-0.13-0.14 / 0.21 s against the 0.10-0.11 / 0.15-0.16 above (about 30-40% slower at 16K; a cached follow-up prefills a short
-suffix, which is the path this change touches, so that is a regression candidate rather than noise and it is not explained
-here), and the peak footprint is unchanged: decode 3.65 / 4.09 GB in both sessions, the 16K-prefill peak 4.18 -> 4.19 GiB on
+0.13-0.14 / 0.21 s against the 0.10-0.11 / 0.15-0.16 above, which is this switch's own cost at a short suffix: in an A/B the
+same evening, `NI_DORY_ATTN_T=0` reads 0.092 / 0.154 s of cached follow-up and the default 0.113 / 0.195 (+23% / +27%, about
+40 ms at 16K) while cold prefill reads 1,545 / 1,163 against 1,600 / 1,281 tok/s (the second arm was contention-flagged at
+6.07% mean, so read its prefill as a lower bound). A cached follow-up prefills a short suffix, where the tensor kernel's
+32-token threadgroups and 16-key tiles have nothing to amortize, so the 40 ms is the price of the prefill cells above; a
+fallback below some token count is follow-up work, not part of this measurement. The peak footprint is unchanged: decode 3.65 / 4.09 GB in both sessions, the 16K-prefill peak 4.18 -> 4.19 GiB on
 last-loop KV and 5.02-5.03 -> 4.98 on per-loop. The last-loop record carries
 the harness's contention flag on its 16K prefill (Microsoft Edge Helper, mean 2.3%, a busy run up to 32.7%), so that one
 cell is a lower bound.
