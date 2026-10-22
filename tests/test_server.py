@@ -164,6 +164,12 @@ def cli_checks(kapitsa):
     models = os.path.join(home, "models")
     rc, out, _ = run("list", "--json")
     check("cli: list --json on an empty store", rc == 0 and json.loads(out) == [], out)
+    for invalid in ["256", "0:320", "320:256", "1:2x", "1:2:3"]:
+        rc, out, err = run("serve", "--low-thinking-budget", invalid)
+        check(f"cli: reject invalid low thinking budget {invalid}",
+              rc != 0 and "positive TARGET:LIMIT" in err, err)
+    rc, out, err = run("serve", "--low-thinking-budget", "256:320", "--help")
+    check("cli: accept low thinking budget", rc == 0 and "--low-thinking-budget" in out, out + err)
     for name, aliases in [("qwen3.6-35b-a3b", ["35b:4bit", "QWEN3.6-35B-A3B:4bit",
                                                "Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Speed"]),
                           ("qwen3.8-27b", ["27b:4bit", "27B:4BIT", "lmstudio-community/Qwen3.8-27B-MLX-4bit",

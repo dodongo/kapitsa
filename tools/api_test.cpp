@@ -43,6 +43,38 @@ void check(bool ok, const std::string& name, const std::string& detail = "") {
 
 ojson J(const char* s) { return ojson::parse(s); }
 
+void reasoning_budgets() {
+  ReasoningBudget b;
+  check(ReasoningBudget::parse("256:320", b) && b.target == 256 && b.limit == 320,
+        "reasoning budget: parse target and hard limit");
+  for (const char* bad : {"", "256", "0:320", "256:0", "320:256", "-1:320", "1:2:3", "1:2x",
+                          "999999999999:320", ":320", "256:"})
+    check(!ReasoningBudget::parse(bad, b), std::string("reasoning budget: reject ") + bad);
+  ReasoningBudget::parse("3:5", b);
+  check(!b.push("Done.") && !b.push(" More") && b.push(" done!"),
+        "reasoning budget: ignore early sentence, close at a sentence after target");
+  ReasoningBudget::parse("3:5", b);
+  check(!b.push("a") && !b.push("b") && !b.push("c") && !b.push("d") && b.push("e") && b.tokens == 5,
+        "reasoning budget: hard ceiling without punctuation");
+  ReasoningBudget::parse("1:5", b);
+  check(b.push("Really?\") \n"), "reasoning budget: closing quotes, brackets and whitespace");
+  ReasoningBudget::parse("1:5", b);
+  check(!b.push("Step 3.") && b.push(" Done."), "reasoning budget: skip numbered-list and numeric period");
+  ReasoningBudget::parse("1:5", b);
+  check(!b.push("```python\nx = thing.") && b.push("name\n```\nDone."),
+        "reasoning budget: ignore punctuation inside fenced code");
+  ReasoningBudget::parse("1:1", b);
+  check(b.push("") && b.tokens == 1, "reasoning budget: count tokens even with buffered parser text");
+  ReasoningBudget::parse("256:320", b);
+  bool early = false;
+  for (int i = 1; i <= 255; ++i) early = early || b.push("word ");
+  check(!early && b.push("end.") && b.tokens == 256, "reasoning budget: 256-token sentence boundary");
+  ReasoningBudget::parse("256:320", b);
+  early = false;
+  for (int i = 1; i <= 319; ++i) early = early || b.push("word ");
+  check(!early && b.push("word") && b.tokens == 320, "reasoning budget: 320-token hard ceiling");
+}
+
 struct Event {
   std::string name;
   ojson data;
@@ -1104,6 +1136,7 @@ bool exists(const std::string& p) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  reasoning_budgets();
   anthropic_mapping();
   responses_mapping();
   anthropic_events();

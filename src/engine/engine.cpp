@@ -436,6 +436,8 @@ Engine::Engine(const EngineOptions& o) : opts_(o) {
     slots_.push_back(std::move(s));
   };
   for (int i = 0; i < std::max(1, opts_.slots); ++i) add_slot(opts_.context);
+  if (opts_.low_thinking_budget.target > 0 && (!q35_ || !dfl_ || think_close_ < 0))
+    fatal("--low-thinking-budget needs a Qwen model with DFlash2 and a </think> token");
   Gpu& g = Gpu::get();
   const size_t used = g.allocated_bytes(), per = model_->kv_bytes_per_pos();
   const size_t room = budget_ > used ? budget_ - used : 0;
@@ -2269,6 +2271,9 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   const auto& eos = stop_ids_;
   double t1 = now_ms();
   int gen = 0;
+  ReasoningBudget reasoning_budget = opts_.low_thinking_budget;
+  const bool low_budget = reasoning_budget.target > 0 && r.effort == "low";
+  bool close_thinking = false, budget_break = false;
   std::string content_so_far;
   std::string finish;
   // structured output: </think> ends a speculative loop running the reasoning (g_in_spec), whose drafts and verify
@@ -2277,6 +2282,10 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   // Handles one generated token; returns false when generation must stop (finish is set), or when a speculative loop
   // gives the reply to the constrained loop (g_break).
   auto handle = [&](int t) -> bool {
+    if (low_budget && close_thinking && parser.in_think()) {
+      t = think_close_;
+      budget_break = true;
+    }
     ++gen;
     if (live) live->tokens.store(gen, std::memory_order_relaxed);
     if (std::find(eos.begin(), eos.end(), t) != eos.end()) {
@@ -2296,8 +2305,10 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
         g_break = g_in_spec;
       }
     }
-    if (parser.in_think()) ++res.reasoning_tokens;
+    const bool reasoning_token = parser.in_think() && t != think_close_ && t != think_open_;
+    if (reasoning_token) ++res.reasoning_tokens;
     ChatDelta d = parser.push(t);
+    if (low_budget && reasoning_token) close_thinking = reasoning_budget.push(d.reasoning);
     if (!parser.error().empty()) {
       res.error = parser.error();
       finish = "error";
@@ -2322,7 +2333,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     if (!d.reasoning.empty() || !d.content.empty() || !d.tool_calls.empty() || !d.tool_call_deltas.empty())
       if (!on_delta(d)) finish = "cancelled";
     if (finish.empty() && gen >= r.max_tokens) finish = "length";
-    return finish.empty() && !g_break;
+    return finish.empty() && !g_break && !budget_break;
   };
   // KV room for `want` positions between two cycles, with nothing of this request in flight: as reserve_kv, but
   // when other requests' caches hold the memory, park and wait for them to end (park() makes the request's state its
@@ -2367,6 +2378,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     explicit Decoding(Slot& sl) : s(sl) { s.decoding = true; }
     ~Decoding() { s.decoding = false; }
   } decoding{slot};
+  if (low_budget) slot.decoding = false;
   const std::function<bool(int)> handle_fn = handle;
   const std::function<void(int)> cycle_fn = cycle_done;
   // joins the batch at a cycle boundary (parked) and returns there once the request stopped (true) or is back in its
@@ -2625,7 +2637,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
         // another request waits for the GPU, this one for memory (start_cycles waits for it), or it joins the batch:
         // no drafting half behind this verify, park after it
         const bool turn = contended();
-        const bool join = !kv_wait && batch_wanted();  // (a request waiting for memory would leave the batch at once)
+        const bool join = !low_budget && !kv_wait && batch_wanted();  // (a request waiting for memory would leave the batch at once)
         const bool park = turn || kv_wait || join;
         const bool room = P + Bk + Bk + Bk + 2 < s.cap;  // the next anchor is at most P + Bk
         park_last = park && room;
@@ -2705,6 +2717,16 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
       q35_->encode_flush(*e3, s);
       e3->commit_and_wait();
       fed_until = P;
+      if (budget_break) {
+        s.tokens()[P] = think_close_;
+        budget_break = false;
+        logi("chat: low reasoning closed after %d tokens (target %d, limit %d)", reasoning_budget.tokens,
+             reasoning_budget.target, reasoning_budget.limit);
+        if (!finish.empty()) break;
+        g_break = g_in_spec = false;
+        go = true;
+        continue;
+      }
       if (dfl_->tree() && dfl_->budget() && req_cycles > 0) {
         logi("%s", dfl_->budget()->summary().c_str());
         dfl_->budget()->save(KfBudget::kSaveEvery);
