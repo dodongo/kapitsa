@@ -127,4 +127,21 @@ std::string ChatCompletionsStream::end(const ChatResult& res) {
   return chunk(ojson::object(), res.finish_reason, &u) + "data: [DONE]\n\n";
 }
 
+std::string ChatCompletionsStream::progress(const LiveDecode& live) {
+  const int phase = live.phase.load(std::memory_order_relaxed);
+  if (phase != 1 && phase != 2) return "";
+  const int total = live.prompt.load(std::memory_order_relaxed);
+  const int cached = live.cached.load(std::memory_order_relaxed);
+  const int processed = live.read.load(std::memory_order_relaxed);
+  if (total <= 0 || cached < 0 || processed < cached || processed > total || processed == progress_read_) return "";
+  progress_read_ = processed;
+  ojson c{{"id", id_},
+          {"object", "chat.completion.chunk"},
+          {"created", created_},
+          {"model", model_},
+          {"choices", ojson::array()},
+          {"prompt_progress", {{"total", total}, {"cached", cached}, {"processed", processed}}}};
+  return "data: " + dump(c) + "\n\n";
+}
+
 }  // namespace ni::api

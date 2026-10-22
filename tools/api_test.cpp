@@ -657,6 +657,40 @@ void chat_events() {
   }
 }
 
+void prefill_progress() {
+  ChatCompletionsStream w("chatcmpl-progress", "m", 123);
+  LiveDecode live;
+  check(w.progress(live).empty(), "chat progress: queued requests have no counts");
+  live.prompt = 100;
+  live.cached = 20;
+  live.read = 20;
+  live.phase = 1;
+  auto events = parse_sse(w.progress(live));
+  check(events.size() == 1 && events[0].data["choices"].empty() &&
+            events[0].data["prompt_progress"] == J(R"({"total":100,"cached":20,"processed":20})"),
+        "chat progress: cache reuse is separate from completed prefill");
+  check(w.progress(live).empty(), "chat progress: unchanged counts emit nothing");
+  live.read = 60;
+  check(parse_sse(w.progress(live))[0].data["prompt_progress"]["processed"] == 60,
+        "chat progress: completed chunks advance the count");
+  live.read = 100;
+  live.phase = 2;
+  check(parse_sse(w.progress(live))[0].data["prompt_progress"]["processed"] == 100,
+        "chat progress: decoding reports the completed prompt");
+  check(w.progress(live).empty(), "chat progress: decoding does not repeat completion");
+  live.phase = 3;
+  check(w.progress(live).empty(), "chat progress: finished requests emit nothing");
+  live.phase = 1;
+  live.read = 101;
+  check(w.progress(live).empty(), "chat progress: inconsistent counts emit nothing");
+  live.read = 10;
+  check(w.progress(live).empty(), "chat progress: reads before cached tokens emit nothing");
+  live.cached = -1;
+  check(w.progress(live).empty(), "chat progress: negative counts emit nothing");
+  live.prompt = 0;
+  check(w.progress(live).empty(), "chat progress: empty prompts emit nothing");
+}
+
 // ---------------------------------------------------------------- the launchers
 
 void clients() {
@@ -1052,6 +1086,7 @@ int main(int argc, char** argv) {
   anthropic_events();
   responses_events();
   chat_events();
+  prefill_progress();
   clients();
   std::vector<std::string> dirs;
   for (int i = 1; i < argc; ++i) {

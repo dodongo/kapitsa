@@ -424,7 +424,7 @@ struct StreamJob {
 static void stream_reply(std::shared_ptr<RequestGuard> guard, const ChatRequest& r, std::shared_ptr<api::StreamWriter> w, httplib::Response& res,
                          std::function<std::pair<int, json>(const ChatResult&)> failure,
                          std::function<void(const ChatResult&)> after, std::shared_ptr<ui::Meter> meter,
-                         bool early = false) {
+                         bool early = false, std::function<std::string()> progress = nullptr) {
   auto job = std::make_shared<StreamJob>();
   job->worker = std::thread([guard, r, w, meter, early, raw = job.get()] {
     auto start = [&](const ChatResult& prompt) {  // with raw->mu held
@@ -475,7 +475,7 @@ static void stream_reply(std::shared_ptr<RequestGuard> guard, const ChatRequest&
     return;
   }
   res.set_header("Cache-Control", "no-cache");
-  res.set_chunked_content_provider("text/event-stream", [guard, job, w, after, meter](size_t, httplib::DataSink& sink) {
+  res.set_chunked_content_provider("text/event-stream", [guard, job, w, after, meter, progress](size_t, httplib::DataSink& sink) {
     // the client is gone: the engine stops at its next token, or gives the request up before it takes a slot
     auto gone = [&] {
       job->cancel();
@@ -492,6 +492,10 @@ static void stream_reply(std::shared_ptr<RequestGuard> guard, const ChatRequest&
         std::unique_lock<std::mutex> lk(job->mu);
         // a second at a time while nothing comes, to see whether the client is still there
         job->cv.wait_for(lk, std::chrono::seconds(1), [&] { return !job->out.empty() || job->done; });
+        if (progress && !job->done) {
+          std::string update = progress();
+          if (!update.empty()) job->out.push_front(std::move(update));
+        }
         if (job->out.empty() && !job->done && std::chrono::steady_clock::now() - last >= std::chrono::seconds(15))
           job->out.push_back(w->keepalive());  // 15 s without an event
         batch.swap(job->out);
@@ -1021,8 +1025,11 @@ static int serve(int argc, char** argv, int first) {
       return;
     }
     // the stream (src/api/chat_completions.cpp) starts as soon as the prompt is known to fit, before the slot
-    stream_reply(guard, r, std::make_shared<api::ChatCompletionsStream>(id, model, created), res, api::chat_failure,
-                 [&, r](const ChatResult& out) { prefill_after(r, out); }, meter, true);
+    if (!r.live) r.live = std::make_shared<LiveDecode>();
+    const auto writer = std::make_shared<api::ChatCompletionsStream>(id, model, created);
+    stream_reply(guard, r, writer, res, api::chat_failure,
+                 [&, r](const ChatResult& out) { prefill_after(r, out); }, meter, true,
+                 [writer, live = r.live] { return writer->progress(*live); });
   });
 
   // Anthropic Messages (src/api/anthropic.cpp)

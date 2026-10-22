@@ -39,6 +39,7 @@ class ChatCompletionsStream : public StreamWriter {
   std::string begin(const ChatResult& prompt) override;
   std::string delta(const ChatDelta& d) override;
   std::string keepalive() override;
+  std::string progress(const LiveDecode& live);
   std::string end(const ChatResult& res) override;
 
  private:
@@ -46,6 +47,7 @@ class ChatCompletionsStream : public StreamWriter {
   std::string id_, model_;
   long created_;
   size_t tools_ = 0;  // tool calls sent: the next one's index
+  int progress_read_ = -1;
 };
 
 }  // namespace ni::api
