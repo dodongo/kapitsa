@@ -2255,6 +2255,18 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
       last2->wait();
       last2.reset();
     }
+    if (cancelled && cancelled()) {
+      if (last) last->wait();
+      e.reset();
+      if (dfl_) dfl_->end_prefill();
+      if (lili_) lili_->end_prefill();
+      drop_slot(slot);
+      res.prefill_ms = now_ms() - t0;
+      res.finish_reason = "cancelled";
+      if (live) live->phase.store(3, std::memory_order_relaxed);
+      logi("chat: cancelled during prefill at %d of %d tokens after %.0f ms", p, n, res.prefill_ms);
+      return res;
+    }
     // a chunk is long: the turn goes to a waiting request at once (no NI_TURN_MS)
     if (p > start && p <= capture_from && contended(false)) {
       if (last) last->wait();  // the chunks so far (e holds nothing yet)
@@ -2446,6 +2458,10 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   // Handles one generated token; returns false when generation must stop (finish is set), or when a speculative loop
   // gives the reply to the constrained loop (g_break).
   auto handle = [&](int t) -> bool {
+    if (cancelled && cancelled()) {
+      finish = "cancelled";
+      return false;
+    }
     ++gen;
     if (live) live->tokens.store(gen, std::memory_order_relaxed);
     if (std::find(eos.begin(), eos.end(), t) != eos.end()) {
