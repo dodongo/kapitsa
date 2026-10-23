@@ -352,6 +352,7 @@ ResponsesRequest responses_request(const ojson& body, const ResponseStore& store
   apply_effort(str(reasoning, "effort"), r.template_kwargs);
   r.effort = str(reasoning, "effort");   // looped models: the loop count (Engine::request_loops)
   r.loops = request_loops_field(body);
+  r.thinking_budget = request_thinking_budget(body);
   if (body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object())
     for (auto& [k, v] : body["chat_template_kwargs"].items()) r.template_kwargs[k] = v;
 

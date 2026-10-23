@@ -436,8 +436,6 @@ Engine::Engine(const EngineOptions& o) : opts_(o) {
     slots_.push_back(std::move(s));
   };
   for (int i = 0; i < std::max(1, opts_.slots); ++i) add_slot(opts_.context);
-  if (opts_.low_thinking_budget.target > 0 && (!q35_ || !dfl_ || think_close_ < 0))
-    fatal("--low-thinking-budget needs a Qwen model with DFlash2 and a </think> token");
   Gpu& g = Gpu::get();
   const size_t used = g.allocated_bytes(), per = model_->kv_bytes_per_pos();
   const size_t room = budget_ > used ? budget_ - used : 0;
@@ -2271,9 +2269,16 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   const auto& eos = stop_ids_;
   double t1 = now_ms();
   int gen = 0;
-  ReasoningBudget reasoning_budget = opts_.low_thinking_budget;
-  const bool low_budget = reasoning_budget.target > 0 && r.effort == "low";
-  bool close_thinking = false, budget_break = false;
+  const std::vector<int> closing_tokens = think_close_ >= 0 ? std::vector<int>{think_close_} : tok_.encode("</think>");
+  ReasoningBudget reasoning_budget = ReasoningBudget::for_request(r.effort, r.max_tokens, r.thinking_budget,
+                                                                 int(closing_tokens.size()));
+  const bool thinking_enabled = r.effort != "none" && r.thinking_budget != 0 &&
+      (!r.template_kwargs.contains("enable_thinking") || r.template_kwargs["enable_thinking"] != false);
+  const bool bounded_reasoning = (think || thinking_enabled) && (think_close_ >= 0 || text_tags_.think) &&
+                                 !closing_tokens.empty();
+  const bool budget_direct = bounded_reasoning && (!dfl_ || lili_ || think_close_ < 0);
+  const bool dflash_budget = bounded_reasoning && !budget_direct;
+  bool close_thinking = false, budget_break = false, injecting_closure = false;
   std::string content_so_far;
   std::string finish;
   // structured output: </think> ends a speculative loop running the reasoning (g_in_spec), whose drafts and verify
@@ -2282,7 +2287,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   // Handles one generated token; returns false when generation must stop (finish is set), or when a speculative loop
   // gives the reply to the constrained loop (g_break).
   auto handle = [&](int t) -> bool {
-    if (low_budget && close_thinking && parser.in_think()) {
+    if (dflash_budget && (close_thinking || reasoning_budget.limit == 0) && parser.in_think()) {
       t = think_close_;
       budget_break = true;
     }
@@ -2305,10 +2310,14 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
         g_break = g_in_spec;
       }
     }
-    const bool reasoning_token = parser.in_think() && t != think_close_ && t != think_open_;
+    const bool reasoning_token = parser.in_think() && t != think_close_ && t != think_open_ && !injecting_closure;
     if (reasoning_token) ++res.reasoning_tokens;
     ChatDelta d = parser.push(t);
-    if (low_budget && reasoning_token) close_thinking = reasoning_budget.push(d.reasoning);
+    if (gm && !g_on && !parser.in_think()) {
+      g_on = true;
+      g_break = g_in_spec;
+    }
+    if (bounded_reasoning && reasoning_token) close_thinking = reasoning_budget.push(d.reasoning);
     if (!parser.error().empty()) {
       res.error = parser.error();
       finish = "error";
@@ -2378,7 +2387,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     explicit Decoding(Slot& sl) : s(sl) { s.decoding = true; }
     ~Decoding() { s.decoding = false; }
   } decoding{slot};
-  if (low_budget) slot.decoding = false;
+  if (bounded_reasoning) slot.decoding = false;
   const std::function<bool(int)> handle_fn = handle;
   const std::function<void(int)> cycle_fn = cycle_done;
   // joins the batch at a cycle boundary (parked) and returns there once the request stopped (true) or is back in its
@@ -2408,7 +2417,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   const bool spec_loop = lili_ || dfl_ || dory_spec_ > 0 || nh_ngram_ > 0 || depth > 0;
   const bool g_dfl = gm && dfl_ && grammar_spec;
   const bool g_direct = gm && !g_dfl && (g_on || !spec_loop);
-  g_in_spec = gm && !g_direct && !g_on;
+  g_in_spec = gm && !g_direct && !g_on && !budget_direct;
   double mask_ms = 0;  // the masks this request computed (host ms) and how many (the log line at its end)
   long mask_n = 0;
   // A DFlash2 cycle's masks (a tree's row r: tokens[P + r] under its parent; a chain's: tokens[P + 1 .. P + r])
@@ -2416,7 +2425,49 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     const int* t = tree ? dfl_->tree_desc() : nullptr;
     verify_masks(*gm, gst, s, P, rows, t ? t + kf::kPar : nullptr, t ? std::clamp(t[kf::kN], 1, rows) : rows);
   };
-  if (g_direct) {
+  if (budget_direct) {
+    int pos = n;
+    size_t closing = 0;
+    bool forced_closure = false;
+    if (reasoning_budget.limit == 0 && parser.in_think()) {
+      injecting_closure = true;
+      forced_closure = true;
+      s.tokens()[pos] = closing_tokens[closing++];
+    }
+    while (handle(s.tokens()[pos])) {
+      if (!parser.in_think()) {
+        closing = 0;
+        injecting_closure = false;
+      }
+      if (pos + 1 >= s.cap &&
+          (pos + 1 >= s.limit || !grow_kv(std::min(s.limit, pos + 2), [] {}))) {
+        finish = "length";
+        res.context_full = true;
+        break;
+      }
+      if (gm && g_on) {
+        gm->fill_mask(gst, s.mask.as<uint32_t>());
+        s.mask_rows = 1;
+      }
+      auto step = model_->grouped_passes() ? g.begin_grouped() : g.begin();
+      model_->encode_step(*step, s, pos, sp, uint32_t(pos), true);
+      step->commit_and_wait();
+      s.mask_rows = 0;
+      fed_until = ++pos;
+      cycle_done(1);
+      if (parser.in_think() && (close_thinking || reasoning_budget.limit == 0)) {
+        if (closing < closing_tokens.size()) {
+          injecting_closure = true;
+          forced_closure = true;
+          s.tokens()[pos] = closing_tokens[closing++];
+        }
+      }
+      if (contended()) yield_turn(res);
+    }
+    if (forced_closure)
+      logi("chat: reasoning closed after %d tokens (target %d, limit %d)", reasoning_budget.tokens,
+           reasoning_budget.target, reasoning_budget.limit);
+  } else if (g_direct) {
     // (the constrained loop below)
   } else if (lili_) {
     // LiLiCorr / DSpark: per cycle the drafter's context commit of the previous cycle's kept rows and the drafting pass
@@ -2637,7 +2688,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
         // another request waits for the GPU, this one for memory (start_cycles waits for it), or it joins the batch:
         // no drafting half behind this verify, park after it
         const bool turn = contended();
-        const bool join = !low_budget && !kv_wait && batch_wanted();  // (a request waiting for memory would leave the batch at once)
+        const bool join = !bounded_reasoning && !kv_wait && batch_wanted();
         const bool park = turn || kv_wait || join;
         const bool room = P + Bk + Bk + Bk + 2 < s.cap;  // the next anchor is at most P + Bk
         park_last = park && room;
@@ -2720,7 +2771,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
       if (budget_break) {
         s.tokens()[P] = think_close_;
         budget_break = false;
-        logi("chat: low reasoning closed after %d tokens (target %d, limit %d)", reasoning_budget.tokens,
+        logi("chat: reasoning closed after %d tokens (target %d, limit %d)", reasoning_budget.tokens,
              reasoning_budget.target, reasoning_budget.limit);
         if (!finish.empty()) break;
         g_break = g_in_spec = false;
@@ -2962,7 +3013,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   }
   const bool switched = g_break;  // a speculative loop ended at </think>: tokens[fed_until] is it, handled
   g_break = g_in_spec = false;
-  if (gm && finish.empty() && (g_direct || switched)) {
+  if (gm && !budget_direct && finish.empty() && (g_direct || switched)) {
     // ---- structured output: plain steps, each token sampled under the grammar's mask ----
     // A step's layers run while the host computes the mask of its sample (the grammar's state after the token the step
     // feeds) and signals the event its sampler waits on (Seq::mask_event); the next step is queued before the host reads
@@ -3107,7 +3158,7 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
   // rows [start, fed_until) are this request's; after tool calls the next request continues the live state as it is
   // (after a final answer the history prefill makes it so)
   disk_filled(slot, start, fed_until);
-  slot.live_ok = finish == "tool_calls";
+  slot.live_ok = finish == "tool_calls" && !(budget_direct && (lili_ || dfl_ || depth > 0));
   ++slot.version;  // (a state the SSD prefix cache does not have yet)
   char cyc[64] = "";
   if ((dfl_ || lili_ || dory_spec_ || nh_ngram_) && req_cycles > 0)

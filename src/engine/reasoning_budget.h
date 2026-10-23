@@ -1,6 +1,6 @@
 #pragma once
 
-#include <charconv>
+#include <algorithm>
 #include <cctype>
 #include <string>
 #include <string_view>
@@ -13,16 +13,18 @@ struct ReasoningBudget {
   int tokens = 0;
   std::string text;
 
-  static bool parse(std::string_view value, ReasoningBudget& out) {
-    const size_t colon = value.find(':');
-    if (colon == std::string_view::npos) return false;
-    int target = 0, limit = 0;
-    auto a = std::from_chars(value.data(), value.data() + colon, target);
-    auto b = std::from_chars(value.data() + colon + 1, value.data() + value.size(), limit);
-    if (a.ec != std::errc() || a.ptr != value.data() + colon || b.ec != std::errc() ||
-        b.ptr != value.data() + value.size() || target < 1 || limit < target) return false;
-    out = {target, limit, 0, {}};
-    return true;
+  static ReasoningBudget for_request(std::string_view effort, int max_tokens, int requested, int close_tokens) {
+    if (effort == "none" || requested == 0) return {};
+    ReasoningBudget out{1536, 2048, 0, {}};
+    if (effort == "minimal") out = {96, 128, 0, {}};
+    else if (effort == "low") out = {256, 320, 0, {}};
+    else if (effort == "medium") out = {768, 1024, 0, {}};
+    if (requested > 0) out.limit = std::min(out.limit, requested);
+    const int total = std::max(0, max_tokens);
+    const int room = total - std::min(1024, std::max(1, total / 2)) - close_tokens;
+    out.limit = std::max(0, std::min(out.limit, room));
+    out.target = std::min(out.target, out.limit);
+    return out;
   }
 
   bool push(std::string_view delta) {

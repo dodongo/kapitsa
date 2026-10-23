@@ -392,7 +392,13 @@ and thinks only when the request asks for it.
 
 Effort levels: `none` and `minimal` turn thinking off; `low` and `medium` go to the chat template, where Qwen3.8 uses
 them; `high`, `xhigh` and `max` keep the template's default, Qwen3.8's highest level. The other models think the same at
-every level. In Messages, `"thinking": {..., "display": "omitted"}` returns thinking blocks without their text.
+every level. Reasoning ends at a sentence after 256 tokens for `low`, by 320 tokens; after 768 for `medium`, by 1024;
+and after 1536 for `high`, `xhigh`, `max` or an omitted effort, by 2048. These limits apply to every model with a
+thinking block, including image requests. Smaller output limits reduce the budget to leave room for an answer and
+the closing tag. Chat Completions and Responses accept a positive integer `thinking_token_budget` to lower the
+ceiling; Messages uses `thinking.budget_tokens`. DFlash2 keeps speculative decoding; other decoders use bounded plain
+steps when thinking is enabled. In Messages, `"thinking": {..., "display": "omitted"}` returns thinking blocks without
+their text.
 
 ### Structured output
 

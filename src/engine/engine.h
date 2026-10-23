@@ -45,7 +45,6 @@ struct EngineOptions {
   int slots = 0;
   int prefill_chunk = 0;       // rows per prefill pass; 0 = 2048, or 1024 when that leaves too little memory
   int spec_depth = -1;         // MTP draft tokens per cycle (0 = no speculative decoding, -1 = model default)
-  ReasoningBudget low_thinking_budget;
   double mem_budget_gb = 0;    // GPU memory Kapitsa may hold (GB); 0 = default_mem_budget()
   // DFlash2 block drafter (replaces MTP when loaded): "auto" = DFlash2::find() next to the model / in
   // ~/.cache/nace-infer-models/drafters (MTP when none matches), "none" = MTP, or a drafter directory.

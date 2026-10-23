@@ -39,6 +39,7 @@ bool unpack_reasoning(const std::string& blob, std::string* text);
 // low, medium and xhigh, the default, and raises on anything else; Qwen3.6 has no levels). Other values are left out
 // (returns false).
 bool apply_effort(const std::string& effort, ojson& kwargs);
+int request_thinking_budget(const ojson& body);
 
 // A request's own loop count for looped models (Dory): "loops" in the body (the OpenAI clients' extra_body), 1-4,
 // else 0. Throws ApiError (400) for another value.

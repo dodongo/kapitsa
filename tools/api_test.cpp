@@ -44,32 +44,55 @@ void check(bool ok, const std::string& name, const std::string& detail = "") {
 ojson J(const char* s) { return ojson::parse(s); }
 
 void reasoning_budgets() {
-  ReasoningBudget b;
-  check(ReasoningBudget::parse("256:320", b) && b.target == 256 && b.limit == 320,
-        "reasoning budget: parse target and hard limit");
-  for (const char* bad : {"", "256", "0:320", "256:0", "320:256", "-1:320", "1:2:3", "1:2x",
-                          "999999999999:320", ":320", "256:"})
-    check(!ReasoningBudget::parse(bad, b), std::string("reasoning budget: reject ") + bad);
-  ReasoningBudget::parse("3:5", b);
+  for (const auto& [effort, limit] : std::vector<std::pair<std::string, int>>{
+           {"none", 0}, {"minimal", 128}, {"low", 320}, {"medium", 1024}, {"high", 2048},
+           {"xhigh", 2048}, {"max", 2048}, {"", 2048}}) {
+    auto budget = ReasoningBudget::for_request(effort, 8192, -1, 1);
+    check(budget.limit == limit && budget.target <= budget.limit, "reasoning budget: " + effort);
+  }
+  for (int total : {1, 2, 8, 128, 1024, 2048, 8192}) {
+    auto budget = ReasoningBudget::for_request("xhigh", total, -1, 1);
+    check(budget.limit >= 0 && budget.limit + 1 <= total, "reasoning budget: leave answer room " + std::to_string(total));
+  }
+  auto requested = ReasoningBudget::for_request("xhigh", 8192, 32, 1);
+  check(ReasoningBudget::for_request("xhigh", -2147483647 - 1, -1, 1).limit == 0,
+        "reasoning budget: invalid output ceiling cannot overflow");
+  check(requested.target == 32 && requested.limit == 32, "reasoning budget: explicit smaller limit");
+  check(ReasoningBudget::for_request("low", 8192, 999999, 1).limit == 320,
+        "reasoning budget: explicit limit cannot raise server ceiling");
+  check(ReasoningBudget::for_request("xhigh", 8192, 0, 1).limit == 0, "reasoning budget: disabled");
+  check(request_thinking_budget(ojson::object()) == -1 && request_thinking_budget({{"thinking_token_budget", 32}}) == 32,
+        "reasoning budget: read request field");
+  ChatResult usage;
+  usage.reasoning_tokens = 8;
+  check(chat_usage(usage)["completion_tokens_details"]["reasoning_tokens"] == 8,
+        "reasoning budget: report generated reasoning tokens");
+  for (const auto& bad : {ojson(0), ojson(-1), ojson(1.5), ojson("32"), ojson(nullptr), ojson(2147483648LL)}) {
+    bool rejected = false;
+    try { request_thinking_budget({{"thinking_token_budget", bad}}); }
+    catch (const ApiError&) { rejected = true; }
+    check(rejected, "reasoning budget: reject invalid request field " + bad.dump());
+  }
+  ReasoningBudget b{3, 5, 0, {}};
   check(!b.push("Done.") && !b.push(" More") && b.push(" done!"),
         "reasoning budget: ignore early sentence, close at a sentence after target");
-  ReasoningBudget::parse("3:5", b);
+  b = {3, 5, 0, {}};
   check(!b.push("a") && !b.push("b") && !b.push("c") && !b.push("d") && b.push("e") && b.tokens == 5,
         "reasoning budget: hard ceiling without punctuation");
-  ReasoningBudget::parse("1:5", b);
+  b = {1, 5, 0, {}};
   check(b.push("Really?\") \n"), "reasoning budget: closing quotes, brackets and whitespace");
-  ReasoningBudget::parse("1:5", b);
+  b = {1, 5, 0, {}};
   check(!b.push("Step 3.") && b.push(" Done."), "reasoning budget: skip numbered-list and numeric period");
-  ReasoningBudget::parse("1:5", b);
+  b = {1, 5, 0, {}};
   check(!b.push("```python\nx = thing.") && b.push("name\n```\nDone."),
         "reasoning budget: ignore punctuation inside fenced code");
-  ReasoningBudget::parse("1:1", b);
+  b = {1, 1, 0, {}};
   check(b.push("") && b.tokens == 1, "reasoning budget: count tokens even with buffered parser text");
-  ReasoningBudget::parse("256:320", b);
+  b = {256, 320, 0, {}};
   bool early = false;
   for (int i = 1; i <= 255; ++i) early = early || b.push("word ");
   check(!early && b.push("end.") && b.tokens == 256, "reasoning budget: 256-token sentence boundary");
-  ReasoningBudget::parse("256:320", b);
+  b = {256, 320, 0, {}};
   early = false;
   for (int i = 1; i <= 319; ++i) early = early || b.push("word ");
   check(!early && b.push("word") && b.tokens == 320, "reasoning budget: 320-token hard ceiling");
@@ -291,6 +314,10 @@ void responses_mapping() {
       {"role": "user", "content": "next"}]})");
   body["input"][3]["encrypted_content"] = pack_reasoning("plan, exactly");
   const ResponsesRequest q = responses_request(body, store);
+  auto bounded_body = body;
+  bounded_body["thinking_token_budget"] = 32;
+  check(responses_request(bounded_body, store).chat.thinking_budget == 32,
+        "responses: numeric reasoning budget reaches the engine");
   const ojson want = J(R"([
     {"role": "system", "content": "Base instructions.\n\nDev rules."},
     {"role": "user", "content": "<env/>"},

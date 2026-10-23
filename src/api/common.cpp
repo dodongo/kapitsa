@@ -80,6 +80,15 @@ bool apply_effort(const std::string& effort, ojson& kwargs) {
   return true;
 }
 
+int request_thinking_budget(const ojson& body) {
+  if (!body.contains("thinking_token_budget")) return -1;
+  const auto& value = body["thinking_token_budget"];
+  if (!value.is_number_integer() || value.get<int64_t>() < 1 || value.get<int64_t>() > INT32_MAX)
+    throw ApiError(400, "invalid_request_error", "thinking_token_budget must be a positive integer", "",
+                   "thinking_token_budget");
+  return int(value.get<int64_t>());
+}
+
 int request_loops_field(const ojson& body) {
   if (!body.is_object() || !body.contains("loops") || body["loops"].is_null()) return 0;
   const ojson& v = body["loops"];

@@ -114,6 +114,7 @@ static ChatRequest parse_request(const json& b, const ChatRequest& defaults) {
     r.effort = e;  // looped models: the loop count (Engine::request_loops)
   }
   r.loops = api::request_loops_field(b);
+  r.thinking_budget = api::request_thinking_budget(b);
   // structured output: response_format, tool_choice required or named, strict tools (src/api/chat_completions.cpp)
   r.grammar = api::chat_grammar(b, r.tools);
   return r;
@@ -324,9 +325,6 @@ static void print_serve_help() {
          "  --mem-budget GB        GPU memory Kapitsa may hold (default: what macOS recommends for this GPU, a\n"
          "                         little less; kapitsa doctor shows it)\n"
          "  --prefill-chunk N      prompt tokens per prefill pass (default 2048, 1024 when memory is short)\n"
-         "  --low-thinking-budget TARGET:LIMIT\n"
-         "                         low effort: end reasoning at a sentence after TARGET tokens, by LIMIT\n"
-         "                         (opt-in; Qwen with DFlash2)\n"
          "  --disk-cache SIZE      SSD prefix cache: conversations kept on the SSD, also across restarts, in\n"
          "                         %s/prefix-cache. auto (default): a quarter of the free space beyond\n"
          "                         10 GiB, at most 32 GiB; a size (16G) caps it; 0 turns it off\n"
@@ -658,10 +656,6 @@ static int serve(int argc, char** argv, int first) {
     else if (a == "--spec") opt.spec_depth = to_int(a, next(), help);
     else if (a == "--dflash") opt.dflash = next();
     else if (a == "--prefill-chunk") opt.prefill_chunk = to_int(a, next(), help);
-    else if (a == "--low-thinking-budget") {
-      if (!ReasoningBudget::parse(next(), opt.low_thinking_budget))
-        usage_error("--low-thinking-budget requires positive TARGET:LIMIT with TARGET <= LIMIT", help);
-    }
     else if (a == "--api-key") api_key = next();
     else if (a == "--allow-switch") allow_switch = true;
     else if (a == "--mem-budget") opt.mem_budget_gb = to_gb(a, next(), help);
