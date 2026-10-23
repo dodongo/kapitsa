@@ -202,11 +202,11 @@ static int shortpf_max() {
   return std::clamp(v, 0, 128);
 }
 // Row limits of the other short-prefill paths (read once; 0 turns a path off):
-//   NI_SHORTPF_ATTN_MAX (default 128): attention as (query, head) rows of one KV head with the keys
+//   NI_SHORTPF_ATTN_MAX (default 192): attention as (query, head) rows of one KV head with the keys
 //     split over threadgroups (attn_prefill11g / 11gs + attn11_reduce)
 //   NI_SHORTPF_MOE_MAX (default 128): MoE experts in 8-row tiles (qmms_moe_gu / qmms_moe_dn)
 static int shortpf_attn_max() {
-  static const int v = std::clamp(env_int("NI_SHORTPF_ATTN_MAX", 128), 0, 512);
+  static const int v = std::clamp(env_int("NI_SHORTPF_ATTN_MAX", 192), 0, 512);
   return v;
 }
 static int shortpf_moe_max() {
@@ -251,6 +251,18 @@ static bool short_qmms(int M, double bytes, bool gu, bool multi, uint32_t K) {
   return bytes < 24e6 && M <= 56;
 }
 
+// A chunk of M new rows whose GEMM this matrix's tensor_ops tile can serve (qmtg_m64_n64 / qmt_m64_n64: qmt_on, 4-bit
+// group 64, K a multiple of 64, M >= 64) is faster there than in the short-prefill families, which are sized for the
+// chunks under 64 rows (NI_SHORTPF's own comment). Measured on the M5 Pro, 27B, 16K cached prefix, one chunk of new
+// rows, short-prefill against tensor_ops: 73 rows 679 -> 399 ms, 124 rows 1005 -> 483 ms. The short-prefill staging
+// bound (one weight read, fewer blocks) only wins below 64 rows, where qmt does not run; 8-bit and unaligned
+// projections, and every MoE expert GEMM, keep the short path they have.
+bool Qwen35::sp_qmt_pref(const QLinear& L, int M) const {
+  static const bool on = env_int("NI_SP_QMT", 1) != 0;  // 0 restores the pre-change short-prefill preference
+  if (!on || cfg_.moe) return false;  // a MoE model's chunk keeps the short-prefill / qmtm split it had
+  return M >= 64 && qmt_on() && L.bits == 4 && L.gs == 64 && L.K % 64 == 0;
+}
+
 // Short-prefill qmr tile for M <= 128 rows: R row tiles (1 up to 48 rows, 2 above; fused gate/up
 // tiles hold at most 32 rows), BM = 8 ceil(M / R / 8), 64-wide N tiles (32-wide measured slower on
 // every 35B / 27B shape). `seg`: the multi-projection form (qmrs_*).
@@ -272,7 +284,9 @@ static ShortTile short_tile(int M, bool gu, bool seg) {
 // Projections sharing the half input xh (same K): one short-prefill dispatch where the kernels
 // allow it, else one enc_qmm per projection.
 void Qwen35::enc_proj(Encoder& e, const std::vector<SegQ>& segs, const Buffer& xh, int M) {
-  if (small_t(M) && sp_gemm() != SpGemm::Qmr && segs.size() <= 4) {
+  bool qmt = M >= 64 && qmt_on();
+  for (auto& s : segs) qmt = qmt && sp_qmt_pref(*s.L, M);
+  if (!qmt && small_t(M) && sp_gemm() != SpGemm::Qmr && segs.size() <= 4) {
     bool all_qmr = true, all_qmms = true;
     double bytes = 0;
     for (auto& s : segs) {
@@ -2158,7 +2172,7 @@ void Qwen35::enc_rows_half(Encoder& e, const Buffer& x, const Tensor* norm, cons
 }
 
 void Qwen35::enc_qmm(Encoder& e, const QLinear& L, const Buffer& xh, const Buffer& y, int M, bool add) {
-  if (small_t(M) && sp_gemm() != SpGemm::Qmr && (qmr_ok(L) || qmms_ok(L))) {
+  if (!sp_qmt_pref(L, M) && small_t(M) && sp_gemm() != SpGemm::Qmr && (qmr_ok(L) || qmms_ok(L))) {
     enc_proj(e, {{&L, y, add}}, xh, M);
     return;
   }
@@ -2528,13 +2542,14 @@ bool Qwen35::enc_mlp_gpu_part_qmt(Encoder& e, const Layer& L, int T, uint32_t g,
 // NI_QMM_GU (read once, needs qmr; default on, NI_QMM_GU=0 off): dense MLP / shared-expert gate and up projections
 // and SwiGLU in one qmr_gu dispatch writing the half h rows (no fp32 hg/hu, no swiglu pass).
 bool Qwen35::enc_qmm_gu(Encoder& e, const QLinear& G, const QLinear& U, const Buffer& xh, const Buffer& h, int M) {
-  if (small_t(M) && sp_gemm() != SpGemm::Qmr) {
+  const bool qmt_gu = sp_qmt_pref(G, M) && sp_qmt_pref(U, M);  // qmtg_m64_n64 fuses the pair
+  if (!qmt_gu && small_t(M) && sp_gemm() != SpGemm::Qmr) {
     const bool tiles = qmr_ok(G) && qmr_ok(U) && G.N == U.N && G.K == U.K;
     const bool qm = !tiles || sp_gemm() == SpGemm::Qmms ||
                     (sp_gemm() == SpGemm::Auto && short_qmms(M, qbytes(G) + qbytes(U), true, false, G.K));
     if (qm && M <= 64 && enc_qmms_gu(e, G, U, xh, h, M)) return true;
   }
-  if (small_t(M) && sp_gemm() != SpGemm::Qmr && qmr_ok(G) && qmr_ok(U) && G.N == U.N && G.K == U.K) {
+  if (!qmt_gu && small_t(M) && sp_gemm() != SpGemm::Qmr && qmr_ok(G) && qmr_ok(U) && G.N == U.N && G.K == U.K) {
     const ShortTile t = short_tile(M, true, false);
     e.use(pipe(t.name));
     kp::Qmm p{uint32_t(M), G.N, G.K, G.K, G.N, 0, uint32_t(G.gs), 0, 0};

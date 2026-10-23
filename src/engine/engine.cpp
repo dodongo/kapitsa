@@ -2274,12 +2274,15 @@ ChatResult Engine::chat(const ChatRequest& r, const std::function<bool(const Cha
     return v && v[0] == '1' && v[1] == 0;
   }();
   // DFlash2's prompt-capture hook covers the last 2047 rows of the prompt (kCtxKeep), and a wide pass whose first
-  // row lies below it is a fatal: a longer suffix must not enter this path. The 128-row default is the longest
-  // measured suffix: 116 rows at a 16K prefix costs 757 ms as verify passes against 994 ms on the prefill path
-  // (64 rows 491 against 527), and the pass keeps winning there, so the older 64-row cap was leaving 24% on the table
+  // row lies below it is a fatal: a longer suffix must not enter this path. The cap is where the prefill path stops
+  // being the slower one: it used to be 128 rows on the measurement "116 rows at a 16K prefix costs 757 ms as verify
+  // passes against 994 ms on the prefill path (64 rows 491 against 527)", but that prefill number was the
+  // short-prefill families', and a 65..128-row chunk takes the tensor-op GEMM now (Qwen35::sp_qmt_pref): 73 rows
+  // 433 ms as passes against 399 on the prefill path, 124 rows 663 against 483. Below 64 rows the pass still wins
+  // (55 rows 376 against 537), so the cap is that boundary
   static const int vpf_max = [] {
     const char* v = getenv("NI_VPF_MAX");
-    return std::min(2047, v ? std::max(0, atoi(v)) : 128);
+    return std::min(2047, v ? std::max(0, atoi(v)) : 64);
   }();
   // one pass: the widest whole-tile count the target's verify holds (Qwen35::vpf_pass_rows: 32 on a dense target at
   // the NI_VPF weight floor, else 8/16), as much of the suffix as fits in one weights read (~90 ms at 16K whether the

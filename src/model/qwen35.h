@@ -534,6 +534,9 @@ class Qwen35 : public Model {
     bool add;
   };
   bool small_t(int T) const;
+  // this matrix's tensor_ops tile (qmtg_m64_n64 / qmt_m64_n64) covers a chunk of M >= 64 rows, so the short-prefill
+  // families are not the faster path there (sp_qmt_pref, NI_SP_QMT=0 restores the earlier preference)
+  bool sp_qmt_pref(const QLinear& L, int M) const;
   bool qmms_ok(const QLinear& L) const;
   void enc_qmms(Encoder& e, std::vector<SegQ> segs, const Buffer& xh, int T);
   // projections sharing xh: one dispatch where the short-prefill kernels allow it
